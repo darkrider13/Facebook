@@ -42,6 +42,13 @@
                 <data android:host="fb.watch" />
                 <data android:host="fb.me" />
             </intent-filter>
+
+            <!-- Share a link to this app from WhatsApp, Messenger, browser... -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
         </activity>
     </application>
 

@@ -18,10 +18,29 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Open Facebook links (from WhatsApp, Messenger, browser...) directly in this app -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:scheme="http" />
+                <data android:host="facebook.com" />
+                <data android:host="www.facebook.com" />
+                <data android:host="m.facebook.com" />
+                <data android:host="web.facebook.com" />
+                <data android:host="mbasic.facebook.com" />
+                <data android:host="fb.com" />
+                <data android:host="www.fb.com" />
+                <data android:host="fb.watch" />
+                <data android:host="fb.me" />
             </intent-filter>
         </activity>
     </application>

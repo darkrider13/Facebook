@@ -380,24 +380,33 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        intent.data?.let { webView.loadUrl(startUrlFrom(intent)) }
+        linkFrom(intent)?.let { webView.loadUrl(it) }
     }
 
-    /** Facebook link opened from another app (WhatsApp, Messenger, browser...) -> load it here. */
-    private fun startUrlFrom(intent: Intent?): String {
-        val data = intent?.data
-        if (intent?.action == Intent.ACTION_VIEW && data != null &&
-            (data.scheme == "http" || data.scheme == "https")
-        ) {
-            val host = data.host?.lowercase()
-            return if (host == "www.facebook.com" || host == "facebook.com" || host == "web.facebook.com") {
-                data.buildUpon().scheme("https").authority("m.facebook.com").build().toString()
-            } else {
-                data.buildUpon().scheme("https").build().toString()
-            }
+    /** Link coming from another app: a tapped link (VIEW) or a shared one (SEND). */
+    private fun linkFrom(intent: Intent?): String? {
+        var link: Uri? = null
+
+        if (intent?.action == Intent.ACTION_VIEW) {
+            link = intent.data
+        } else if (intent?.action == Intent.ACTION_SEND) {
+            val text = intent.getStringExtra(Intent.EXTRA_TEXT)
+            val found = text?.let { Regex("https?://\\S+").find(it)?.value }
+            link = found?.let { Uri.parse(it) }
         }
-        return "https://m.facebook.com"
+
+        if (link == null || (link.scheme != "http" && link.scheme != "https")) return null
+
+        val host = link.host?.lowercase()
+        return if (host == "www.facebook.com" || host == "facebook.com" || host == "web.facebook.com") {
+            link.buildUpon().scheme("https").authority("m.facebook.com").build().toString()
+        } else {
+            link.buildUpon().scheme("https").build().toString()
+        }
     }
+
+    private fun startUrlFrom(intent: Intent?): String =
+        linkFrom(intent) ?: "https://m.facebook.com"
 
     private fun isInternalHost(host: String?): Boolean {
         if (host == null) return false

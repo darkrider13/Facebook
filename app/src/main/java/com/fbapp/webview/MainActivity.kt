@@ -14,6 +14,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.Settings
 import android.util.Base64
 import android.webkit.JavascriptInterface
 import android.webkit.URLUtil
@@ -60,7 +61,7 @@ class MainActivity : AppCompatActivity() {
 
                     if (status == DownloadManager.STATUS_SUCCESSFUL) {
                         val savedName = localUri?.let { uriStr -> Uri.parse(uriStr).lastPathSegment } ?: "file"
-                        Toast.makeText(context, "Downloaded: $savedName", Toast.LENGTH_LONG).show()
+                        Toast.makeText(context, "Downloaded", Toast.LENGTH_SHORT).show()
                     } else {
                         Toast.makeText(context, "Download failed", Toast.LENGTH_LONG).show()
                     }
@@ -92,7 +93,7 @@ class MainActivity : AppCompatActivity() {
                 FileOutputStream(outFile).use { it.write(bytes) }
 
                 runOnUiThread {
-                    Toast.makeText(this@MainActivity, "Downloaded $fileName", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "Downloaded", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
                 runOnUiThread {
@@ -107,6 +108,70 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this@MainActivity, "Save error: $message", Toast.LENGTH_LONG).show()
             }
         }
+    }
+
+    private companion object {
+        // Presses Escape, and if a menu is still open taps the empty area outside it.
+        const val DISMISS_MENU_JS = """
+            (function() {
+                function esc(type) {
+                    return new KeyboardEvent(type, {
+                        key: 'Escape', code: 'Escape', keyCode: 27, which: 27,
+                        bubbles: true, cancelable: true
+                    });
+                }
+                [document.activeElement, document.body, document].forEach(function(t) {
+                    if (t) { t.dispatchEvent(esc('keydown')); t.dispatchEvent(esc('keyup')); }
+                });
+                setTimeout(function() {
+                    if (document.querySelector('[role="menu"]')) {
+                        var el = document.elementFromPoint(6, Math.round(window.innerHeight * 0.3));
+                        if (el && !el.closest('[role="menu"]')) { el.click(); }
+                    }
+                }, 120);
+            })();
+        """
+
+        // Remembers the playback position of a video and restores it when the page/video
+        // is opened again (e.g. after coming back from the comments).
+        const val VIDEO_RESUME_JS = """
+            (function() {
+                if (window.__fbVideoResume) return;
+                window.__fbVideoResume = true;
+                var MAX_AGE = 10 * 60 * 1000;
+                function hook(v) {
+                    if (v.__resumeHooked) return;
+                    v.__resumeHooked = true;
+                    var key = '__vp:' + location.pathname + location.search;
+                    var saved = null;
+                    try { saved = JSON.parse(sessionStorage.getItem(key) || 'null'); } catch (e) {}
+                    if (saved && saved.t > 2 && (Date.now() - saved.at) < MAX_AGE) {
+                        var restore = function() {
+                            if (!v.__restored && v.duration && saved.t < v.duration - 1) {
+                                v.__restored = true;
+                                try { v.currentTime = saved.t; } catch (e) {}
+                            }
+                        };
+                        v.addEventListener('loadedmetadata', restore);
+                        v.addEventListener('canplay', restore);
+                        if (v.readyState >= 1) restore();
+                    }
+                    v.addEventListener('timeupdate', function() {
+                        try {
+                            if (v.currentTime > 2) {
+                                sessionStorage.setItem(key, JSON.stringify({ t: v.currentTime, at: Date.now() }));
+                            }
+                        } catch (e) {}
+                    });
+                    v.addEventListener('ended', function() {
+                        try { sessionStorage.removeItem(key); } catch (e) {}
+                    });
+                }
+                setInterval(function() {
+                    document.querySelectorAll('video').forEach(hook);
+                }, 400);
+            })();
+        """
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -146,6 +211,7 @@ class MainActivity : AppCompatActivity() {
                 super.onPageFinished(view, url)
                 // Commit the login/session cookie to disk so it survives a background process kill.
                 CookieManager.getInstance().flush()
+                view.evaluateJavascript(VIDEO_RESUME_JS, null)
             }
 
             // Non-Facebook links open in the phone's browser, Facebook links stay in the app.
@@ -270,6 +336,45 @@ class MainActivity : AppCompatActivity() {
         } else {
             webView.loadUrl(startUrlFrom(intent))
         }
+
+        promptOpenByDefaultOnce()
+    }
+
+    /**
+     * Android 12+ does not let an app open facebook.com links by itself; the user has to
+     * switch on "Open supported links" and tick the links once. On first launch we take
+     * them straight to that settings screen.
+     */
+    private fun promptOpenByDefaultOnce() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("open_by_default_prompted", false)) return
+        prefs.edit().putBoolean("open_by_default_prompted", true).apply()
+
+        webView.postDelayed({
+            try {
+                Toast.makeText(
+                    this,
+                    "Open supported links chalu kore Add link e sob link tick daw",
+                    Toast.LENGTH_LONG
+                ).show()
+                startActivity(
+                    Intent(
+                        Settings.ACTION_APP_OPEN_BY_DEFAULT_SETTINGS,
+                        Uri.parse("package:$packageName")
+                    )
+                )
+            } catch (e: Exception) {
+                try {
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.parse("package:$packageName")
+                        )
+                    )
+                } catch (_: Exception) { }
+            }
+        }, 2500)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -340,9 +445,19 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Closes the open Facebook popup menu (Save / report...) in the main WebView. */
+    private fun dismissFacebookMenu() {
+        webView.post {
+            webView.evaluateJavascript(DISMISS_MENU_JS, null)
+        }
+    }
+
     /** Shared download logic used by both the main WebView and any popup WebView. */
     private fun handleDownload(source: WebView, url: String, contentDisposition: String?, mimeType: String?) {
         val fileName = URLUtil.guessFileName(url, contentDisposition, mimeType)
+
+        // Close Facebook's "Save / I don't want to see this" menu right away.
+        dismissFacebookMenu()
 
         if (url.startsWith("blob:")) {
             val isImage = mimeType?.startsWith("image") == true ||
@@ -421,7 +536,6 @@ class MainActivity : AppCompatActivity() {
             }
 
             getSystemService<DownloadManager>()?.enqueue(request)
-            Toast.makeText(this, "Downloading $fileName", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             Toast.makeText(this, "Download failed: ${e.message}", Toast.LENGTH_SHORT).show()
         }

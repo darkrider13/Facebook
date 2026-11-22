@@ -134,6 +134,9 @@ class MainActivity : AppCompatActivity() {
         settings.javaScriptCanOpenWindowsAutomatically = true
         settings.setSupportMultipleWindows(true)
 
+        // Force dark mode for the page content
+        enableDarkMode()
+
         // Keep login sessions saved
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
@@ -368,6 +371,16 @@ class MainActivity : AppCompatActivity() {
 
         if (notGranted.isNotEmpty()) {
             permissionLauncher.launch(notGranted.toTypedArray())
+        }
+    }
+
+    private fun enableDarkMode() {
+        webView.setBackgroundColor(Color.BLACK)
+        if (Build.VERSION.SDK_INT >= 33) {
+            webView.settings.isAlgorithmicDarkeningAllowed = true
+        } else if (Build.VERSION.SDK_INT >= 29) {
+            @Suppress("DEPRECATION")
+            webView.settings.forceDark = WebSettings.FORCE_DARK_ON
         }
     }
 

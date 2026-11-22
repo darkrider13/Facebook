@@ -147,6 +147,14 @@ class MainActivity : AppCompatActivity() {
                 // Commit the login/session cookie to disk so it survives a background process kill.
                 CookieManager.getInstance().flush()
             }
+
+            // Non-Facebook links open in the phone's browser, Facebook links stay in the app.
+            override fun shouldOverrideUrlLoading(
+                view: WebView,
+                request: android.webkit.WebResourceRequest
+            ): Boolean {
+                return handleExternalLink(request.url.toString())
+            }
         }
 
         webView.addJavascriptInterface(BlobDownloader(), "AndroidDownloader")
@@ -205,8 +213,27 @@ class MainActivity : AppCompatActivity() {
                 // The popup never needs to be shown on screen; it only exists to let the
                 // page's JS run (fetch/blob/save logic) and hand the result back to us.
                 popup.webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView, url: String?) {
-                        Toast.makeText(this@MainActivity, "Popup loaded: $url", Toast.LENGTH_SHORT).show()
+                    private var handled = false
+
+                    private fun interceptExternal(view: WebView, url: String?): Boolean {
+                        if (url == null || handled) return false
+                        if (handleExternalLink(url)) {
+                            handled = true
+                            view.stopLoading()
+                            view.post { view.destroy() }
+                            return true
+                        }
+                        return false
+                    }
+
+                    override fun shouldOverrideUrlLoading(
+                        view: WebView,
+                        request: android.webkit.WebResourceRequest
+                    ): Boolean = interceptExternal(view, request.url.toString())
+
+                    override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
+                        super.onPageStarted(view, url, favicon)
+                        interceptExternal(view, url)
                     }
                 }
 
@@ -241,7 +268,75 @@ class MainActivity : AppCompatActivity() {
         if (savedInstanceState != null) {
             webView.restoreState(savedInstanceState)
         } else {
-            webView.loadUrl("https://m.facebook.com")
+            webView.loadUrl(startUrlFrom(intent))
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        intent.data?.let { webView.loadUrl(startUrlFrom(intent)) }
+    }
+
+    /** Facebook link opened from another app (WhatsApp, Messenger, browser...) -> load it here. */
+    private fun startUrlFrom(intent: Intent?): String {
+        val data = intent?.data
+        if (intent?.action == Intent.ACTION_VIEW && data != null &&
+            (data.scheme == "http" || data.scheme == "https")
+        ) {
+            val host = data.host?.lowercase()
+            return if (host == "www.facebook.com" || host == "facebook.com" || host == "web.facebook.com") {
+                data.buildUpon().scheme("https").authority("m.facebook.com").build().toString()
+            } else {
+                data.buildUpon().scheme("https").build().toString()
+            }
+        }
+        return "https://m.facebook.com"
+    }
+
+    private fun isInternalHost(host: String?): Boolean {
+        if (host == null) return false
+        val h = host.lowercase()
+        val domains = listOf(
+            "facebook.com", "fb.com", "fb.me", "fb.watch",
+            "fbcdn.net", "fbsbx.com", "facebook.net", "messenger.com", "m.me"
+        )
+        return domains.any { h == it || h.endsWith(".$it") }
+    }
+
+    /** Returns true if the link was handed to the phone's browser/app (so the WebView must not load it). */
+    private fun handleExternalLink(url: String): Boolean {
+        val uri = Uri.parse(url)
+        val scheme = uri.scheme?.lowercase() ?: return false
+        if (scheme in listOf("about", "blob", "data", "javascript", "file")) return false
+
+        if (scheme == "http" || scheme == "https") {
+            val host = uri.host?.lowercase()
+            // Facebook wraps outgoing links as l.facebook.com/l.php?u=<real link>
+            if ((host == "l.facebook.com" || host == "lm.facebook.com" || host == "l.messenger.com") &&
+                uri.path?.startsWith("/l.php") == true
+            ) {
+                val target = uri.getQueryParameter("u")
+                if (!target.isNullOrEmpty()) {
+                    openInBrowser(target)
+                    return true
+                }
+                return false
+            }
+            if (isInternalHost(host)) return false
+        }
+
+        openInBrowser(url)
+        return true
+    }
+
+    private fun openInBrowser(url: String) {
+        try {
+            startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE)
+            )
+        } catch (e: Exception) {
+            Toast.makeText(this, "Link open kora jai ni", Toast.LENGTH_SHORT).show()
         }
     }
 

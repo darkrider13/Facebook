@@ -11,14 +11,26 @@ android {
         applicationId "com.fbapp.webview"
         minSdk 21
         targetSdk 34
-        versionCode 1
+        versionCode Integer.parseInt(System.getenv("GITHUB_RUN_NUMBER") ?: "1")
         versionName "1.0"
+    }
+
+    signingConfigs {
+        release {
+            def ksFile = file("release.keystore")
+            if (ksFile.exists() && System.getenv("KEYSTORE_PASSWORD")) {
+                storeFile ksFile
+                storePassword System.getenv("KEYSTORE_PASSWORD")
+                keyAlias System.getenv("KEY_ALIAS")
+                keyPassword System.getenv("KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         release {
             minifyEnabled false
-            signingConfig signingConfigs.debug
+            signingConfig file("release.keystore").exists() ? signingConfigs.release : signingConfigs.debug
         }
     }
 

@@ -9,18 +9,13 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.database.Cursor
-import android.graphics.Bitmap
 import android.graphics.Color
-import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
-import android.os.Handler
-import android.os.Looper
 import android.provider.Settings
 import android.util.Base64
-import android.view.PixelCopy
 import android.webkit.JavascriptInterface
 import android.webkit.URLUtil
 import android.webkit.ValueCallback
@@ -35,7 +30,6 @@ import java.io.FileOutputStream
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.getSystemService
-import androidx.core.graphics.ColorUtils
 import androidx.core.view.WindowCompat
 
 class MainActivity : AppCompatActivity() {
@@ -43,21 +37,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private val fileChooserRequestCode = 200
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
-
-    // --- Status / navigation bar colour follows whatever the page shows at its edges ---
-    private val barHandler = Handler(Looper.getMainLooper())
-    private val defaultBarColor = Color.parseColor("#121212")
-    private var currentStatusColor = defaultBarColor
-    private var currentNavColor = defaultBarColor
-    private var pendingStatusColor = defaultBarColor
-    private var pendingNavColor = defaultBarColor
-
-    private val barSampler = object : Runnable {
-        override fun run() {
-            sampleBarColors()
-            barHandler.postDelayed(this, 250)
-        }
-    }
 
     /**
      * Notifies the user once a DownloadManager-enqueued file has actually finished
@@ -152,6 +131,33 @@ class MainActivity : AppCompatActivity() {
                 }, 120);
             })();
         """
+
+        // Tells the app whether a big (reel / watch style) video fills the screen.
+        const val BAR_MODE_JS = """
+            (function() {
+                if (window.__fbBarMode) return;
+                window.__fbBarMode = true;
+                var last = null;
+                function bigVideoShown() {
+                    var vids = document.querySelectorAll('video');
+                    for (var i = 0; i < vids.length; i++) {
+                        var r = vids[i].getBoundingClientRect();
+                        var visibleH = Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0);
+                        if (visibleH > window.innerHeight * 0.75 && r.width > window.innerWidth * 0.5) return true;
+                    }
+                    return false;
+                }
+                function check() {
+                    var on = bigVideoShown();
+                    if (on !== last) {
+                        last = on;
+                        try { AndroidBars.setVideoMode(on); } catch (e) {}
+                    }
+                }
+                setInterval(check, 400);
+                check();
+            })();
+        """
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -191,6 +197,7 @@ class MainActivity : AppCompatActivity() {
                 super.onPageFinished(view, url)
                 // Commit the login/session cookie to disk so it survives a background process kill.
                 CookieManager.getInstance().flush()
+                view.evaluateJavascript(BAR_MODE_JS, null)
             }
 
             // Non-Facebook links open in the phone's browser, Facebook links stay in the app.
@@ -203,6 +210,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.addJavascriptInterface(BlobDownloader(), "AndroidDownloader")
+        webView.addJavascriptInterface(BarBridge(), "AndroidBars")
 
         webView.webChromeClient = object : WebChromeClient() {
             override fun onShowFileChooser(
@@ -593,77 +601,23 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Reads the colour of the pixel row just under the status bar and just above the
-     * navigation bar (as actually drawn on screen) and paints the system bars the same,
-     * so they always blend in with the page: normal feed, Reels, Watch, etc.
-     * Needs PixelCopy (Android 8+); on older phones the fixed dark colour stays.
-     */
-    private fun sampleBarColors() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        if (!webView.isAttachedToWindow || webView.width < 8 || webView.height < 8) return
-
-        val loc = IntArray(2)
-        webView.getLocationInWindow(loc)
-        val x = loc[0] + 4
-
-        samplePixel(x, loc[1] + 1) { c -> onStatusSample(c) }
-        samplePixel(x, loc[1] + webView.height - 2) { c -> onNavSample(c) }
-    }
-
-    @androidx.annotation.RequiresApi(Build.VERSION_CODES.O)
-    private fun samplePixel(x: Int, y: Int, onColor: (Int) -> Unit) {
-        val bmp = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
-        try {
-            PixelCopy.request(
-                window,
-                Rect(x, y, x + 1, y + 1),
-                bmp,
-                PixelCopy.OnPixelCopyFinishedListener { result ->
-                    if (result == PixelCopy.SUCCESS) {
-                        onColor(bmp.getPixel(0, 0) or (0xFF shl 24))
-                    }
-                },
-                barHandler
-            )
-        } catch (e: IllegalArgumentException) {
-            // Window not ready to be copied yet; try again on the next tick.
+    /** Lets the page tell us when a big video is on screen, so the bars can be recoloured. */
+    private inner class BarBridge {
+        @JavascriptInterface
+        fun setVideoMode(on: Boolean) {
+            runOnUiThread { applyBarColors(on) }
         }
     }
 
-    // A new colour is applied only once it is seen twice in a row, so moving video
-    // frames at the edge of the screen don't make the bars flicker.
-    private fun onStatusSample(c: Int) {
-        if (c == currentStatusColor) { pendingStatusColor = c; return }
-        if (c == pendingStatusColor) {
-            currentStatusColor = c
-            window.statusBarColor = c
-            WindowCompat.getInsetsController(window, window.decorView)
-                .isAppearanceLightStatusBars = ColorUtils.calculateLuminance(c) > 0.5
-        } else {
-            pendingStatusColor = c
+    // Normal pages: both bars #121212. Big video on screen: status bar matches Facebook's
+    // dark top bar (#242527) and the navigation bar is pure black.
+    private fun applyBarColors(videoMode: Boolean) {
+        val base = Color.parseColor("#121212")
+        window.statusBarColor = if (videoMode) Color.parseColor("#242527") else base
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
         }
-    }
-
-    private fun onNavSample(c: Int) {
-        if (c == currentNavColor) { pendingNavColor = c; return }
-        if (c == pendingNavColor) {
-            currentNavColor = c
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                window.isNavigationBarContrastEnforced = false
-            }
-            window.navigationBarColor = c
-            WindowCompat.getInsetsController(window, window.decorView)
-                .isAppearanceLightNavigationBars = ColorUtils.calculateLuminance(c) > 0.5
-        } else {
-            pendingNavColor = c
-        }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        barHandler.removeCallbacks(barSampler)
-        barHandler.post(barSampler)
+        window.navigationBarColor = if (videoMode) Color.BLACK else base
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -687,7 +641,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        barHandler.removeCallbacks(barSampler)
         // Facebook uses this login session; commit it before we background for the file picker.
         CookieManager.getInstance().flush()
     }

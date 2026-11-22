@@ -9,13 +9,18 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.database.Cursor
+import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.util.Base64
+import android.view.PixelCopy
 import android.webkit.JavascriptInterface
 import android.webkit.URLUtil
 import android.webkit.ValueCallback
@@ -30,6 +35,7 @@ import java.io.FileOutputStream
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.getSystemService
+import androidx.core.graphics.ColorUtils
 import androidx.core.view.WindowCompat
 
 class MainActivity : AppCompatActivity() {
@@ -37,6 +43,21 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private val fileChooserRequestCode = 200
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
+
+    // --- Status / navigation bar colour follows whatever the page shows at its edges ---
+    private val barHandler = Handler(Looper.getMainLooper())
+    private val defaultBarColor = Color.parseColor("#121212")
+    private var currentStatusColor = defaultBarColor
+    private var currentNavColor = defaultBarColor
+    private var pendingStatusColor = defaultBarColor
+    private var pendingNavColor = defaultBarColor
+
+    private val barSampler = object : Runnable {
+        override fun run() {
+            sampleBarColors()
+            barHandler.postDelayed(this, 250)
+        }
+    }
 
     /**
      * Notifies the user once a DownloadManager-enqueued file has actually finished
@@ -131,144 +152,6 @@ class MainActivity : AppCompatActivity() {
                 }, 120);
             })();
         """
-
-        // Remembers each video's playback position (keyed by the video's own id, not the page)
-        // and restores it when that video shows up again, e.g. after coming back from comments.
-        const val VIDEO_RESUME_JS = """
-            (function() {
-                if (window.__fbVideoResume) return;
-                window.__fbVideoResume = true;
-
-                var PREFIX = '__vpos:';
-                var MAX_AGE = 15 * 60 * 1000;
-                var ID_PATTERNS = [
-                    /[?&]v=(\d{6,})/,
-                    /\/videos\/(?:[^\/?#]+\/)?(\d{6,})/,
-                    /\/reel\/(\d{6,})/,
-                    /[?&]video_id=(\d{6,})/
-                ];
-
-                // Drop expired entries from earlier visits.
-                try {
-                    for (var i = sessionStorage.length - 1; i >= 0; i--) {
-                        var k = sessionStorage.key(i);
-                        if (k && k.indexOf(PREFIX) === 0) {
-                            var o = JSON.parse(sessionStorage.getItem(k) || 'null');
-                            if (!o || (Date.now() - o.at) > MAX_AGE) sessionStorage.removeItem(k);
-                        }
-                    }
-                } catch (e) {}
-
-                // Finds this video's own id (not the page's), so every video in a feed gets its own slot.
-                function findId(v) {
-                    var el = v.parentElement, depth = 0;
-                    while (el && el !== document.body && depth < 25) {
-                        // Once the container holds more than one video it is no longer "this" video's post.
-                        if (el.querySelectorAll('video').length > 1) break;
-                        var store = el.getAttribute && el.getAttribute('data-store');
-                        if (store) {
-                            var m = /"videoID"\s*:\s*"?(\d+)/.exec(store);
-                            if (m) return 'v' + m[1];
-                        }
-                        var links = el.querySelectorAll('a[href]');
-                        for (var a = 0; a < links.length; a++) {
-                            var h = links[a].getAttribute('href') || '';
-                            for (var p = 0; p < ID_PATTERNS.length; p++) {
-                                var mm = ID_PATTERNS[p].exec(h);
-                                if (mm) return 'v' + mm[1];
-                            }
-                        }
-                        el = el.parentElement;
-                        depth++;
-                    }
-                    return null;
-                }
-
-                function indexOfVideo(v) {
-                    return Array.prototype.indexOf.call(document.querySelectorAll('video'), v);
-                }
-
-                function hook(v) {
-                    if (v.__fbResumeHooked) return;
-                    v.__fbResumeHooked = true;
-
-                    var id = null, strong = false;
-                    function key() {
-                        if (!strong) {
-                            var found = findId(v);
-                            if (found) { id = found; strong = true; }
-                            else { id = 'p' + location.pathname + location.search + '#' + indexOfVideo(v); }
-                        }
-                        return PREFIX + id;
-                    }
-
-                    var restoring = true;   // no saving until we have decided whether to restore
-                    var decided = false;
-                    var target = null;
-                    var attempts = 0;
-
-                    function finish() { restoring = false; target = null; }
-
-                    function decide() {
-                        if (decided) return;
-                        if (!v.duration || !isFinite(v.duration)) return;
-                        decided = true;
-                        var saved = null;
-                        try { saved = JSON.parse(sessionStorage.getItem(key()) || 'null'); } catch (e) {}
-                        if (saved && saved.t > 2 &&
-                            (Date.now() - saved.at) < MAX_AGE &&
-                            saved.t < v.duration - 1 &&
-                            Math.abs((saved.d || 0) - v.duration) < 1.5) {   // same video? lengths must match
-                            target = saved.t;
-                            setTimeout(finish, 6000);   // safety net: stop fighting the player after 6s
-                        } else {
-                            finish();
-                        }
-                    }
-
-                    function apply() {
-                        decide();
-                        if (target === null) return;
-                        if (Math.abs(v.currentTime - target) > 1.5) {
-                            if (attempts < 8) {
-                                attempts++;
-                                try { v.currentTime = target; } catch (e) {}
-                            } else {
-                                finish();
-                            }
-                        } else {
-                            finish();
-                        }
-                    }
-
-                    ['loadedmetadata', 'durationchange', 'canplay', 'playing', 'seeked'].forEach(function(ev) {
-                        v.addEventListener(ev, apply);
-                    });
-                    if (v.readyState >= 1) apply();
-
-                    v.addEventListener('timeupdate', function() {
-                        if (restoring) return;
-                        if (!v.duration || !isFinite(v.duration)) return;
-                        try {
-                            var t = v.currentTime;
-                            if (t > v.duration - 1) {
-                                sessionStorage.removeItem(key());
-                            } else if (t > 1) {
-                                sessionStorage.setItem(key(), JSON.stringify({ t: t, d: v.duration, at: Date.now() }));
-                            }
-                        } catch (e) {}
-                    });
-
-                    v.addEventListener('ended', function() {
-                        try { sessionStorage.removeItem(key()); } catch (e) {}
-                    });
-                }
-
-                setInterval(function() {
-                    document.querySelectorAll('video').forEach(hook);
-                }, 500);
-            })();
-        """
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -308,7 +191,6 @@ class MainActivity : AppCompatActivity() {
                 super.onPageFinished(view, url)
                 // Commit the login/session cookie to disk so it survives a background process kill.
                 CookieManager.getInstance().flush()
-                view.evaluateJavascript(VIDEO_RESUME_JS, null)
             }
 
             // Non-Facebook links open in the phone's browser, Facebook links stay in the app.
@@ -711,6 +593,79 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Reads the colour of the pixel row just under the status bar and just above the
+     * navigation bar (as actually drawn on screen) and paints the system bars the same,
+     * so they always blend in with the page: normal feed, Reels, Watch, etc.
+     * Needs PixelCopy (Android 8+); on older phones the fixed dark colour stays.
+     */
+    private fun sampleBarColors() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        if (!webView.isAttachedToWindow || webView.width < 8 || webView.height < 8) return
+
+        val loc = IntArray(2)
+        webView.getLocationInWindow(loc)
+        val x = loc[0] + 4
+
+        samplePixel(x, loc[1] + 1) { c -> onStatusSample(c) }
+        samplePixel(x, loc[1] + webView.height - 2) { c -> onNavSample(c) }
+    }
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.O)
+    private fun samplePixel(x: Int, y: Int, onColor: (Int) -> Unit) {
+        val bmp = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+        try {
+            PixelCopy.request(
+                window,
+                Rect(x, y, x + 1, y + 1),
+                bmp,
+                PixelCopy.OnPixelCopyFinishedListener { result ->
+                    if (result == PixelCopy.SUCCESS) {
+                        onColor(bmp.getPixel(0, 0) or (0xFF shl 24))
+                    }
+                },
+                barHandler
+            )
+        } catch (e: IllegalArgumentException) {
+            // Window not ready to be copied yet; try again on the next tick.
+        }
+    }
+
+    // A new colour is applied only once it is seen twice in a row, so moving video
+    // frames at the edge of the screen don't make the bars flicker.
+    private fun onStatusSample(c: Int) {
+        if (c == currentStatusColor) { pendingStatusColor = c; return }
+        if (c == pendingStatusColor) {
+            currentStatusColor = c
+            window.statusBarColor = c
+            WindowCompat.getInsetsController(window, window.decorView)
+                .isAppearanceLightStatusBars = ColorUtils.calculateLuminance(c) > 0.5
+        } else {
+            pendingStatusColor = c
+        }
+    }
+
+    private fun onNavSample(c: Int) {
+        if (c == currentNavColor) { pendingNavColor = c; return }
+        if (c == pendingNavColor) {
+            currentNavColor = c
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                window.isNavigationBarContrastEnforced = false
+            }
+            window.navigationBarColor = c
+            WindowCompat.getInsetsController(window, window.decorView)
+                .isAppearanceLightNavigationBars = ColorUtils.calculateLuminance(c) > 0.5
+        } else {
+            pendingNavColor = c
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        barHandler.removeCallbacks(barSampler)
+        barHandler.post(barSampler)
+    }
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         if (requestCode == fileChooserRequestCode) {
             var results: Array<Uri>? = null
@@ -732,6 +687,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        barHandler.removeCallbacks(barSampler)
         // Facebook uses this login session; commit it before we background for the file picker.
         CookieManager.getInstance().flush()
     }

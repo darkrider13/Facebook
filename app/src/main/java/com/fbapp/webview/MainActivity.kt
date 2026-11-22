@@ -375,7 +375,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun enableDarkMode() {
-        webView.setBackgroundColor(Color.BLACK)
+        webView.setBackgroundColor(Color.parseColor("#121212"))
         if (Build.VERSION.SDK_INT >= 33) {
             webView.settings.isAlgorithmicDarkeningAllowed = true
         } else if (Build.VERSION.SDK_INT >= 29) {
@@ -385,7 +385,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyStatusBarColor() {
-        val color = Color.parseColor("#242424")
+        val color = Color.parseColor("#121212")
 
         window.statusBarColor = color
         window.navigationBarColor = color

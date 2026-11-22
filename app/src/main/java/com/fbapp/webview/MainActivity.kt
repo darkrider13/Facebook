@@ -31,6 +31,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.getSystemService
 import androidx.core.view.WindowCompat
+import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 
 class MainActivity : AppCompatActivity() {
 
@@ -187,6 +190,7 @@ class MainActivity : AppCompatActivity() {
 
         // Force dark mode for the page content
         enableDarkMode()
+        warnIfWebViewOutdated()
 
         // Keep login sessions saved
         CookieManager.getInstance().setAcceptCookie(true)
@@ -579,14 +583,34 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @Suppress("DEPRECATION")
     private fun enableDarkMode() {
         webView.setBackgroundColor(Color.parseColor("#121212"))
-        if (Build.VERSION.SDK_INT >= 33) {
-            webView.settings.isAlgorithmicDarkeningAllowed = true
-        } else if (Build.VERSION.SDK_INT >= 29) {
-            @Suppress("DEPRECATION")
-            webView.settings.forceDark = WebSettings.FORCE_DARK_ON
-        }
+        // Uses the WebView's own dark-mode support, so it works on every Android version
+        // (including Android 9, where the platform forceDark setting doesn't exist).
+        try {
+            when {
+                WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING) ->
+                    WebSettingsCompat.setAlgorithmicDarkeningAllowed(webView.settings, true)
+                WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK) ->
+                    WebSettingsCompat.setForceDark(webView.settings, WebSettingsCompat.FORCE_DARK_ON)
+            }
+        } catch (e: Exception) { /* page just stays in its own theme */ }
+    }
+
+    /** Old phones (e.g. Android 9) often have an outdated WebView, which Facebook's site needs to be recent. */
+    private fun warnIfWebViewOutdated() {
+        try {
+            val major = WebViewCompat.getCurrentWebViewPackage(this)
+                ?.versionName?.substringBefore('.')?.toIntOrNull() ?: return
+            if (major < 100) {
+                Toast.makeText(
+                    this,
+                    "Please update \"Android System WebView\" from Play Store for the best Facebook experience",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        } catch (e: Exception) { }
     }
 
     private fun applyStatusBarColor() {
@@ -594,6 +618,9 @@ class MainActivity : AppCompatActivity() {
 
         window.statusBarColor = color
         window.navigationBarColor = color
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.navigationBarDividerColor = color
+        }
 
         WindowCompat.getInsetsController(window, window.decorView).apply {
             isAppearanceLightStatusBars = false

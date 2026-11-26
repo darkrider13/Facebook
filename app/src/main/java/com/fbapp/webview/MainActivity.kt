@@ -125,6 +125,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private companion object {
+        // TEMPORARY: shows a small toast telling which path opened Messenger. Set to false once tested.
+        const val DEBUG_MESSENGER = true
+
         // Presses Escape, and if a menu is still open taps the empty area outside it.
         const val DISMISS_MENU_JS = """
             (function() {
@@ -938,6 +941,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openMessengerFor(href: String?, pageUrl: String?, uid: String?) {
+        msgSource = "tap"
         var target: String? = null
         if (!href.isNullOrEmpty()) target = messengerTargetFromUrl(Uri.parse(href))
         if (target == null && !pageUrl.isNullOrEmpty()) target = profileTargetFromUrl(Uri.parse(pageUrl))
@@ -1009,6 +1013,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Opens Messenger (straight to the chat if we know the user); Play Store if not installed. */
     private fun openMessenger(uri: Uri) {
+        msgSource = "url-change"
         var target = messengerTargetFromUrl(uri)
         if (target == null) {
             // A "Message" link with extra path/query (not the plain inbox) -> use the profile we came from.
@@ -1019,7 +1024,17 @@ class MainActivity : AppCompatActivity() {
         openMessengerChat(target)
     }
 
+    private var msgSource = "?"
+
     private fun openMessengerChat(target: String?) {
+        if (DEBUG_MESSENGER) {
+            val what = when {
+                target == null -> "no id, opening inbox"
+                target.all { it.isDigit() } -> "numeric ID (fast path)"
+                else -> "username (slow path)"
+            }
+            Toast.makeText(this, "Messenger [" + msgSource + "]: " + what, Toast.LENGTH_SHORT).show()
+        }
         if (target != null) {
             val isNumeric = target.all { it.isDigit() }
             val links = if (isNumeric) {

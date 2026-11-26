@@ -224,43 +224,68 @@ class MainActivity : AppCompatActivity() {
             })();
         """
 
-        // Catches taps on the Messenger tab / "Message" button BEFORE Facebook navigates,
-        // so the "Go to Messenger" page never flashes. Hands the tap to Kotlin instead.
+        // Catches taps on the Messenger tab / "Message" button the instant the finger lifts
+        // (pointer, touch and click), BEFORE Facebook starts loading anything, and hands the
+        // tap to Kotlin so Messenger opens straight away.
         const val MESSENGER_HOOK_JS = """
             (function() {
-                if (window.__fbxMsgHook) return;
-                window.__fbxMsgHook = true;
+                if (window.__fbxMsgHook2) return;
+                window.__fbxMsgHook2 = true;
+                var sx = 0, sy = 0, hasStart = false, lastFire = 0;
+
                 function isMsgHref(h) {
                     if (!h) return false;
                     return /^(https?:\/\/[^\/]*(facebook|messenger)\.com)?\/(messages|messenger)(\/|\?|#|$)/i.test(h) ||
                            /^https?:\/\/(m\.me|(www\.)?messenger\.com)\//i.test(h) ||
                            /^(fb-messenger|intent)/i.test(h);
                 }
-                function labelHit(c) {
-                    var lab = (c.getAttribute('aria-label') || '').trim().toLowerCase();
-                    var txt = (c.innerText || '').trim().toLowerCase();
-                    if (lab === 'messenger' || lab === 'message' || lab === 'messages' ||
-                        lab.indexOf('messenger') === 0 || lab.indexOf('messages') === 0) return true;
-                    if (txt === 'message' || txt === 'messenger') return true;
-                    return false;
+
+                function match(t) {
+                    if (t.closest('input,textarea,[contenteditable="true"],[role="textbox"]')) return null;
+                    var a = t.closest('a[href]');
+                    var href = a ? (a.getAttribute('href') || '') : '';
+                    if (isMsgHref(href)) return { href: href };
+                    var el = t, hops = 0;
+                    while (el && el !== document.body && hops < 8) {
+                        var lab = ((el.getAttribute && el.getAttribute('aria-label')) || '').trim().toLowerCase();
+                        if (lab === 'message' || lab === 'messenger' || lab === 'go to messenger' ||
+                            lab.indexOf('messenger') === 0 || lab.indexOf('messages') === 0) return { href: '' };
+                        var txt = (el.innerText || '').trim().toLowerCase();
+                        if (txt === 'message' || txt === 'messenger') return { href: '' };
+                        if (txt.length > 0) break;   // reached a bigger container with other text
+                        el = el.parentElement; hops++;
+                    }
+                    return null;
                 }
-                function handler(e) {
+
+                function onStart(e) {
+                    var p = (e.touches && e.touches[0]) || e;
+                    sx = p.clientX; sy = p.clientY; hasStart = true;
+                }
+
+                function onEnd(e) {
                     var t = e.target;
                     if (!t || !t.closest) return;
-                    var a = t.closest('a[href]');
-                    var href = a ? a.getAttribute('href') : '';
-                    var hit = isMsgHref(href);
-                    if (!hit) {
-                        var c = t.closest('[role="tab"],[role="button"],[role="link"],button,a');
-                        if (c && c.getAttribute('role') !== 'textbox' && labelHit(c)) hit = true;
+                    var m = match(t);
+                    if (!m) return;
+                    if (e.type === 'pointerup' || e.type === 'touchend') {
+                        var p = (e.changedTouches && e.changedTouches[0]) || e;
+                        if (hasStart && (Math.abs(p.clientX - sx) > 12 || Math.abs(p.clientY - sy) > 12)) return; // scroll, not a tap
                     }
-                    if (!hit) return;
-                    e.preventDefault();
+                    if (e.cancelable) e.preventDefault();
                     e.stopPropagation();
                     if (e.stopImmediatePropagation) e.stopImmediatePropagation();
-                    try { AndroidMessenger.open(href || '', location.href); } catch (err) {}
+                    var now = Date.now();
+                    if (now - lastFire < 800) return;   // same tap already handled
+                    lastFire = now;
+                    try { AndroidMessenger.open(m.href, location.href); } catch (err) {}
                 }
-                window.addEventListener('click', handler, true);
+
+                window.addEventListener('pointerdown', onStart, true);
+                window.addEventListener('touchstart', onStart, { capture: true, passive: true });
+                window.addEventListener('pointerup', onEnd, true);
+                window.addEventListener('touchend', onEnd, { capture: true, passive: false });
+                window.addEventListener('click', onEnd, true);
             })();
         """
 

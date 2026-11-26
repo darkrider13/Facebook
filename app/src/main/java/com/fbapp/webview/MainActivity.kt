@@ -502,6 +502,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(root)
         // Native loading screen (logo + 3 blinking dots) that stays until the home feed is really drawn.
         val loader = buildLoader()
+        setBarColors(Color.BLACK)   // status + navigation bar match the black loading screen
         loaderView = loader
         root.addView(loader, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         // Safety net: never keep the cover up for more than 9 seconds.
@@ -894,11 +895,25 @@ class MainActivity : AppCompatActivity() {
         return overlay
     }
 
+    private fun setBarColors(color: Int) {
+        window.statusBarColor = color
+        window.navigationBarColor = color
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.navigationBarDividerColor = color
+        }
+    }
+
     /** Fades the loading cover out and removes it (safe to call many times). */
     private fun hideLoader() {
         if (loaderHidden) return
         loaderHidden = true
         val v = loaderView ?: return
+        // Bars fade from the loader's black to the normal #121212 together with the cover.
+        ValueAnimator.ofArgb(Color.BLACK, Color.parseColor("#121212")).apply {
+            duration = 220
+            addUpdateListener { setBarColors(it.animatedValue as Int) }
+            start()
+        }
         v.animate().alpha(0f).setDuration(220).withEndAction {
             dotAnimators.forEach { it.cancel() }
             dotAnimators.clear()
@@ -1250,6 +1265,7 @@ class MainActivity : AppCompatActivity() {
     // Normal pages: both bars #121212. Big video on screen: status bar matches Facebook's
     // dark top bar (#242527) and the navigation bar is pure black.
     private fun applyBarColors(videoMode: Boolean) {
+        if (!loaderHidden) return
         val base = Color.parseColor("#121212")
         window.statusBarColor = if (videoMode) Color.parseColor("#242527") else base
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

@@ -38,6 +38,7 @@ import androidx.webkit.WebViewFeature
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
+    private var lastNonMessengerUrl: String? = null
     private val fileChooserRequestCode = 200
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
 
@@ -223,6 +224,46 @@ class MainActivity : AppCompatActivity() {
             })();
         """
 
+        // Catches taps on the Messenger tab / "Message" button BEFORE Facebook navigates,
+        // so the "Go to Messenger" page never flashes. Hands the tap to Kotlin instead.
+        const val MESSENGER_HOOK_JS = """
+            (function() {
+                if (window.__fbxMsgHook) return;
+                window.__fbxMsgHook = true;
+                function isMsgHref(h) {
+                    if (!h) return false;
+                    return /^(https?:\/\/[^\/]*(facebook|messenger)\.com)?\/(messages|messenger)(\/|\?|#|$)/i.test(h) ||
+                           /^https?:\/\/(m\.me|(www\.)?messenger\.com)\//i.test(h) ||
+                           /^(fb-messenger|intent)/i.test(h);
+                }
+                function labelHit(c) {
+                    var lab = (c.getAttribute('aria-label') || '').trim().toLowerCase();
+                    var txt = (c.innerText || '').trim().toLowerCase();
+                    if (lab === 'messenger' || lab === 'message' || lab === 'messages' ||
+                        lab.indexOf('messenger') === 0 || lab.indexOf('messages') === 0) return true;
+                    if (txt === 'message' || txt === 'messenger') return true;
+                    return false;
+                }
+                function handler(e) {
+                    var t = e.target;
+                    if (!t || !t.closest) return;
+                    var a = t.closest('a[href]');
+                    var href = a ? a.getAttribute('href') : '';
+                    var hit = isMsgHref(href);
+                    if (!hit) {
+                        var c = t.closest('[role="tab"],[role="button"],[role="link"],button,a');
+                        if (c && c.getAttribute('role') !== 'textbox' && labelHit(c)) hit = true;
+                    }
+                    if (!hit) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+                    try { AndroidMessenger.open(href || '', location.href); } catch (err) {}
+                }
+                window.addEventListener('click', handler, true);
+            })();
+        """
+
         // Tells the app whether a big (reel / watch style) video fills the screen.
         const val BAR_MODE_JS = """
             (function() {
@@ -292,12 +333,15 @@ class MainActivity : AppCompatActivity() {
                 if (url != null && isMessengerUrl(Uri.parse(url))) {
                     handleExternalLink(url)
                     view.post { if (view.canGoBack()) view.goBack() }
+                } else if (url != null) {
+                    lastNonMessengerUrl = url
                 }
             }
 
             override fun onPageCommitVisible(view: WebView, url: String?) {
                 super.onPageCommitVisible(view, url)
                 view.evaluateJavascript(NO_TAP_HIGHLIGHT_JS, null)
+                view.evaluateJavascript(MESSENGER_HOOK_JS, null)
             }
 
             override fun onPageFinished(view: WebView, url: String?) {
@@ -305,6 +349,7 @@ class MainActivity : AppCompatActivity() {
                 // Commit the login/session cookie to disk so it survives a background process kill.
                 CookieManager.getInstance().flush()
                 view.evaluateJavascript(BAR_MODE_JS, null)
+                view.evaluateJavascript(MESSENGER_HOOK_JS, null)
                 view.evaluateJavascript(NO_TAP_HIGHLIGHT_JS, null)
                 view.evaluateJavascript(VISIBLE_BUTTONS_JS, null)
             }
@@ -320,6 +365,7 @@ class MainActivity : AppCompatActivity() {
 
         webView.addJavascriptInterface(BlobDownloader(), "AndroidDownloader")
         webView.addJavascriptInterface(BarBridge(), "AndroidBars")
+        webView.addJavascriptInterface(MessengerBridge(), "AndroidMessenger")
 
         webView.webChromeClient = object : WebChromeClient() {
             override fun onShowFileChooser(
@@ -568,26 +614,112 @@ class MainActivity : AppCompatActivity() {
         return false
     }
 
-    /** Opens Messenger (straight to the chat if we know the user id); Play Store if not installed. */
-    private fun openMessenger(uri: Uri) {
-        val path = uri.path ?: ""
-        val threadId = Regex("/messages/(?:t|thread)/(\\d+)").find(path)?.groupValues?.get(1)
+    /** Called from the injected JS when the Messenger tab / Message button is tapped. */
+    private inner class MessengerBridge {
+        @JavascriptInterface
+        fun open(href: String, pageUrl: String) {
+            runOnUiThread { openMessengerFor(href, pageUrl) }
+        }
+    }
+
+    private fun openMessengerFor(href: String?, pageUrl: String?) {
+        var target: String? = null
+        if (!href.isNullOrEmpty()) target = messengerTargetFromUrl(Uri.parse(href))
+        if (target == null && !pageUrl.isNullOrEmpty()) target = profileTargetFromUrl(Uri.parse(pageUrl))
+        openMessengerChat(target)
+    }
+
+    /** Pulls the person (numeric id or username) out of a Messenger / "Message" link. */
+    private fun messengerTargetFromUrl(uri: Uri): String? {
+        val scheme = uri.scheme?.lowercase()
+        if (scheme != null && (scheme.startsWith("fb-messenger") || scheme == "intent")) {
+            return Regex("(\\d{6,})").find(uri.toString())?.value
+        }
+        for (key in listOf("ids", "id", "user", "user_id", "uid")) {
+            val v = uri.getQueryParameter(key)?.substringBefore(',')
+            if (v != null && v.matches(Regex("\\d+"))) return v
+        }
         val host = uri.host?.lowercase()
-
-        val deepLink: Uri? = when {
-            host == "m.me" -> uri
-            threadId != null -> Uri.parse("https://m.me/$threadId")
-            else -> null
+        val segs = uri.pathSegments
+        if (host == "m.me" || host?.endsWith(".m.me") == true) {
+            return segs.firstOrNull { it != "j" && it != "ref" }
         }
-
-        // 1) Open the specific chat in Messenger
-        if (deepLink != null) {
-            try {
-                startActivity(Intent(Intent.ACTION_VIEW, deepLink).setPackage(messengerPackage))
-                return
-            } catch (e: Exception) { /* try next */ }
+        if (host == "messenger.com" || host?.endsWith(".messenger.com") == true) {
+            val i = segs.indexOf("t")
+            return if (i != -1) segs.getOrNull(i + 1) else null
         }
-        // 2) Just launch Messenger
+        val i = segs.indexOf("messages")
+        if (i != -1) {
+            val kind = segs.getOrNull(i + 1)
+            if (kind == "t" || kind == "thread") {
+                val id = segs.getOrNull(i + 2)
+                if (id != null && !id.startsWith("cid.")) return id
+            }
+        }
+        return null
+    }
+
+    /** Works out whose profile a Facebook page URL is (numeric id or username). */
+    private fun profileTargetFromUrl(uri: Uri): String? {
+        val host = uri.host?.lowercase() ?: return null
+        if (!(host == "facebook.com" || host.endsWith(".facebook.com"))) return null
+        val segs = uri.pathSegments
+        if (segs.isEmpty()) return null
+
+        val numeric = Regex("\\d{5,}")
+        for (n in listOf("user", "profile")) {
+            val i = segs.indexOf(n)
+            if (i != -1) segs.getOrNull(i + 1)?.takeIf { numeric.matches(it) }?.let { return it }
+        }
+        if (segs[0] == "people") {
+            segs.drop(1).firstOrNull { numeric.matches(it) }?.let { return it }
+        }
+        if (segs[0] == "profile.php") {
+            return uri.getQueryParameter("id")?.takeIf { numeric.matches(it) }
+        }
+        val reserved = setOf(
+            "home.php", "messages", "messenger", "watch", "reel", "reels", "groups", "marketplace",
+            "stories", "events", "pages", "friends", "notifications", "bookmarks", "settings",
+            "menu", "login", "login.php", "search", "hashtag", "gaming", "saved", "memories",
+            "story.php", "photo", "photo.php", "permalink.php", "video", "videos", "posts", "share"
+        )
+        val first = segs[0]
+        if (first.lowercase() !in reserved) return first
+        return null
+    }
+
+    /** Opens Messenger (straight to the chat if we know the user); Play Store if not installed. */
+    private fun openMessenger(uri: Uri) {
+        var target = messengerTargetFromUrl(uri)
+        if (target == null) {
+            // A "Message" link with extra path/query (not the plain inbox) -> use the profile we came from.
+            val path = uri.path?.trimEnd('/') ?: ""
+            val isInbox = path == "/messages" || path == "/messenger" || path.isEmpty()
+            if (!isInbox) lastNonMessengerUrl?.let { target = profileTargetFromUrl(Uri.parse(it)) }
+        }
+        openMessengerChat(target)
+    }
+
+    private fun openMessengerChat(target: String?) {
+        if (target != null) {
+            val isNumeric = target.all { it.isDigit() }
+            val links = if (isNumeric) {
+                listOf(
+                    "fb-messenger://user-thread/$target",
+                    "fb-messenger://user/$target",
+                    "https://m.me/$target"
+                )
+            } else {
+                listOf("https://m.me/$target")
+            }
+            for (link in links) {
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link)).setPackage(messengerPackage))
+                    return
+                } catch (e: Exception) { /* try next */ }
+            }
+        }
+        // Just launch Messenger (inbox)
         try {
             val launch = packageManager.getLaunchIntentForPackage(messengerPackage)
             if (launch != null) {
@@ -595,7 +727,7 @@ class MainActivity : AppCompatActivity() {
                 return
             }
         } catch (e: Exception) { /* try next */ }
-        // 3) Not installed -> Play Store
+        // Not installed -> Play Store
         openMessengerInPlayStore()
     }
 

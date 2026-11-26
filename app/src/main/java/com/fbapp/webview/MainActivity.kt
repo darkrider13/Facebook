@@ -182,20 +182,33 @@ class MainActivity : AppCompatActivity() {
                     var rad = parseFloat(cs.borderTopLeftRadius) || 0;
                     return rad >= r.width * 0.4 || cs.borderTopLeftRadius.indexOf('%') > -1;
                 }
+                function clickable(el) {
+                    return !!(el.closest('[role="button"],[role="link"],button,a,[tabindex]')) ||
+                           getComputedStyle(el).cursor === 'pointer';
+                }
                 function scan() {
-                    var icons = document.querySelectorAll('svg:not([data-fbx-icon]), i:not([data-fbx-icon])');
+                    var icons = document.querySelectorAll('svg:not([data-fbx-icon]), i:not([data-fbx-icon]), img:not([data-fbx-icon])');
                     for (var n = 0; n < icons.length; n++) {
                         var ic = icons[n];
-                        ic.setAttribute('data-fbx-icon', '0');
                         var ir = ic.getBoundingClientRect();
-                        if (ir.width === 0 || ir.width > 44) continue;
+                        if (ir.width === 0 || ir.height === 0) continue; // not laid out yet, retry later
+                        ic.setAttribute('data-fbx-icon', '0');
+                        if (ir.width > 40 || ir.height > 40) continue;
                         var el = ic.parentElement, found = null;
-                        for (var d = 0; d < 4 && el && el !== document.body; d++, el = el.parentElement) {
+                        for (var d = 0; d < 5 && el && el !== document.body; d++, el = el.parentElement) {
                             if (isRound(el)) { found = el; break; }
                         }
                         if (!found) continue;
-                        if ((found.textContent || '').trim() !== '') continue;
-                        if (found.querySelector('img,image,video,canvas')) continue;
+                        var fr = found.getBoundingClientRect();
+                        if (fr.width < ir.width * 1.25) continue;          // icon must sit inside a bigger circle
+                        if (found.querySelector('video,canvas,image')) continue;
+                        if (!clickable(found)) continue;
+                        var imgs = found.querySelectorAll('img');
+                        var big = false;
+                        for (var k = 0; k < imgs.length; k++) {
+                            if (imgs[k].getBoundingClientRect().width > 40) big = true;
+                        }
+                        if (big) continue;                                   // profile photo etc.
                         found.setAttribute('data-fbx-round', '1');
                         ic.setAttribute('data-fbx-icon', '1');
                     }
@@ -334,7 +347,7 @@ class MainActivity : AppCompatActivity() {
                     )
                 } catch (e: Exception) {
                     filePathCallback = null
-                    Toast.makeText(this@MainActivity, "File chooser open kora jai ni", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "Could not open the file chooser", Toast.LENGTH_SHORT).show()
                     return false
                 }
                 return true
@@ -438,7 +451,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 Toast.makeText(
                     this,
-                    "Open supported links chalu kore Add link e sob link tick daw",
+                    "Turn on \"Open supported links\", then select all links under \"Add link\"",
                     Toast.LENGTH_LONG
                 ).show()
                 startActivity(
@@ -603,7 +616,7 @@ class MainActivity : AppCompatActivity() {
                 Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE)
             )
         } catch (e: Exception) {
-            Toast.makeText(this, "Link open kora jai ni", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Could not open the link", Toast.LENGTH_SHORT).show()
         }
     }
 

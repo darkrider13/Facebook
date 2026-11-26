@@ -198,10 +198,17 @@ class MainActivity : AppCompatActivity() {
                     return null;
                 }
 
-                // Numeric id of the profile that is open right now. A numeric id lets Messenger open
-                // the chat instantly (fb-messenger://user-thread/ID); a username has to be looked up first.
-                // The id comes from the page's own app-link meta tag, and is only trusted when the page's
-                // canonical address is the same as the address we are on (so it can't be a stale id).
+                // ---- numeric id of a profile (lets Messenger open the chat instantly) ----
+                var RESERVED = { '': 1, 'home.php': 1, 'messages': 1, 'messenger': 1, 'watch': 1, 'reel': 1, 'reels': 1,
+                    'groups': 1, 'marketplace': 1, 'stories': 1, 'events': 1, 'pages': 1, 'friends': 1, 'notifications': 1,
+                    'bookmarks': 1, 'settings': 1, 'menu': 1, 'login': 1, 'login.php': 1, 'search': 1, 'hashtag': 1,
+                    'gaming': 1, 'saved': 1, 'memories': 1, 'story.php': 1, 'photo': 1, 'photo.php': 1, 'permalink.php': 1,
+                    'video': 1, 'videos': 1, 'posts': 1, 'share': 1, 'profile.php': 1, 'people': 1, 'help': 1, 'policies': 1,
+                    'privacy': 1, 'ads': 1, 'business': 1, 'fundraisers': 1, 'jobs': 1, 'offers': 1, 'live': 1, 'composer': 1 };
+                var ID_RX = /fb:\\?\/\\?\/(?:profile|user)\\?\/(\d{5,})/i;
+                var LS_KEY = '__fbxIds';
+                var idCache = {}, idPending = {}, idTries = {}, active = 0;
+
                 function pageKey(u) {
                     try {
                         var p = new URL(u, location.href);
@@ -209,55 +216,101 @@ class MainActivity : AppCompatActivity() {
                         return path + (path === '/profile.php' ? '?id=' + p.searchParams.get('id') : '');
                     } catch (e) { return ''; }
                 }
-                var idCache = {}, idPending = {}, idTries = {};
+                function profileLike(u) {
+                    try {
+                        var p = new URL(u, location.href);
+                        if (!/(^|\.)facebook\.com$/i.test(p.hostname)) return false;
+                        var segs = p.pathname.split('/').filter(Boolean);
+                        if (segs.length !== 1) return false;
+                        var s = segs[0].toLowerCase();
+                        return !RESERVED[s] && /^[a-z0-9.\-_]+$/i.test(s) && !/\.php$/.test(s);
+                    } catch (e) { return false; }
+                }
+                function lsGet(k) {
+                    try { return (JSON.parse(localStorage.getItem(LS_KEY) || '{}'))[k] || ''; } catch (e) { return ''; }
+                }
+                function lsPut(k, v) {
+                    try {
+                        var o = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
+                        o[k] = v;
+                        var ks = Object.keys(o);
+                        if (ks.length > 500) delete o[ks[0]];
+                        localStorage.setItem(LS_KEY, JSON.stringify(o));
+                    } catch (e) {}
+                }
+                function remember(key, id) { idCache[key] = id; lsPut(key, id); }
+
                 function profileId() {
                     var key = pageKey(location.href);
                     if (idCache[key]) return idCache[key];
+                    var saved = lsGet(key);
+                    if (saved) { idCache[key] = saved; return saved; }
                     try {
+                        // The page's own app-link tag is only right after a full load, so it is trusted only
+                        // when the page's canonical address is this very address.
                         var m = document.querySelector('meta[property="al:android:url"],meta[name="al:android:url"]');
-                        var c = (m && m.getAttribute('content')) || '';
-                        var r = /^fb:\/\/(?:profile|user)\/(\d{5,})/i.exec(c);
+                        var r = ID_RX.exec((m && m.getAttribute('content')) || '');
                         if (!r) return '';
                         var can = document.querySelector('link[rel="canonical"]');
                         var og = document.querySelector('meta[property="og:url"]');
                         var ref = (can && can.href) || (og && og.getAttribute('content')) || '';
-                        if (!ref) return '';
-                        if (pageKey(ref) === key) { idCache[key] = r[1]; return r[1]; }
-                        return '';
-                    } catch (e) { return ''; }
+                        if (ref && pageKey(ref) === key) { remember(key, r[1]); return r[1]; }
+                    } catch (e) {}
+                    return '';
                 }
 
-                // Facebook changes pages without a real reload, so the meta tag above goes stale after the
-                // first profile. For every new profile we quietly fetch its page once in the background,
-                // read the numeric id from the returned html, and keep it ready for the Message tap.
-                function hasMessageBtn() {
-                    try {
-                        if (document.querySelector('[aria-label="Message"]')) return true;
-                        var x = document.evaluate("//*[normalize-space(text())='Message']", document, null,
-                                                  XPathResult.FIRST_ORDERED_NODE_TYPE, null);
-                        return !!x.singleNodeValue;
-                    } catch (e) { return false; }
-                }
-                function prefetchId() {
-                    var url = location.href;
-                    var key = pageKey(url);
-                    if (idCache[key] || idPending[key]) return;
-                    if ((idTries[key] || 0) >= 10) return;
+                // Reads only the first part of the profile's html (the <head>, where the id lives) and stops.
+                function fetchId(u) {
+                    var key = pageKey(u);
+                    if (!key || idCache[key] || idPending[key] || (idTries[key] || 0) >= 3 || active >= 2) return;
+                    if (lsGet(key)) { idCache[key] = lsGet(key); return; }
                     idTries[key] = (idTries[key] || 0) + 1;
-                    if (profileId()) return;
-                    if (!hasMessageBtn()) return;
-                    idPending[key] = true;
-                    fetch(url, { credentials: 'include', headers: { 'Accept': 'text/html' } })
-                        .then(function(r) { return r.text(); })
-                        .then(function(t) {
-                            var m = /al:android:url"[^>]*content="fb:\/\/(?:profile|user)\/(\d{5,})/i.exec(t) ||
-                                    /content="fb:\/\/(?:profile|user)\/(\d{5,})"[^>]*al:android:url/i.exec(t);
-                            if (m) idCache[key] = m[1];
-                            idPending[key] = false;
+                    idPending[key] = true; active++;
+                    function done() { idPending[key] = false; active--; }
+                    fetch(new URL(u, location.href).href, { credentials: 'include' })
+                        .then(function(res) {
+                            if (!res.body || !res.body.getReader) return res.text();
+                            var rd = res.body.getReader(), dec = new TextDecoder(), buf = '';
+                            function pump() {
+                                return rd.read().then(function(x) {
+                                    if (x.done) return buf;
+                                    buf += dec.decode(x.value, { stream: true });
+                                    if (ID_RX.test(buf) || buf.indexOf('</head>') > -1 || buf.length > 300000) {
+                                        try { rd.cancel(); } catch (e) {}
+                                        return buf;
+                                    }
+                                    return pump();
+                                });
+                            }
+                            return pump();
                         })
-                        .catch(function() { idPending[key] = false; });
+                        .then(function(t) {
+                            var m = ID_RX.exec(t || '');
+                            if (m) remember(key, m[1]);
+                            done();
+                        })
+                        .catch(done);
                 }
-                setInterval(function() { try { prefetchId(); } catch (e) {} }, 700);
+
+                // 1) the moment a profile link is tapped, start fetching its id (while the page is still opening)
+                function onTapPrefetch(e) {
+                    try {
+                        var t = e.target;
+                        if (!t || !t.closest) return;
+                        var a = t.closest('a[href]');
+                        if (!a) return;
+                        var p = (e.changedTouches && e.changedTouches[0]) || e;
+                        if (hasStart && (Math.abs(p.clientX - sx) > 12 || Math.abs(p.clientY - sy) > 12)) return;
+                        var h = a.getAttribute('href') || '';
+                        if (profileLike(h)) fetchId(h);
+                    } catch (err) {}
+                }
+                // 2) safety net: whatever profile page is open now
+                setInterval(function() {
+                    try {
+                        if (profileLike(location.href) && !profileId()) fetchId(location.href);
+                    } catch (e) {}
+                }, 400);
 
                 function onStart(e) {
                     var p = (e.touches && e.touches[0]) || e;
@@ -288,34 +341,72 @@ class MainActivity : AppCompatActivity() {
                 window.addEventListener('pointerup', onEnd, true);
                 window.addEventListener('touchend', onEnd, { capture: true, passive: false });
                 window.addEventListener('click', onEnd, true);
+                window.addEventListener('pointerup', onTapPrefetch, true);
+                window.addEventListener('touchend', onTapPrefetch, { capture: true, passive: true });
             })();
         """
 
-        // Hides Facebook's blue "Open app" bar (shown under reels / videos on the mobile site).
-        // Finds the button by its text, then hides the smallest wrapper that holds only that text.
+        // Hides Facebook's blue "Open app" bar (shown under reels / videos and on the home screen).
+        // Runs at DOCUMENT START (before the page draws anything) and reacts to every DOM change
+        // instantly (no timers), so the bar never gets a chance to be painted.
         const val HIDE_OPEN_APP_JS = """
             (function() {
-                function hide() {
-                    var r = document.evaluate("//*[normalize-space(text())='Open app']", document, null,
-                                              XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-                    for (var i = 0; i < r.snapshotLength; i++) {
-                        var node = r.snapshotItem(i);
-                        if (!node || node.getAttribute('data-fbx-gone') === '1') continue;
-                        while (node.parentElement && node.parentElement !== document.body &&
-                               (node.parentElement.textContent || '').trim() === 'Open app') {
-                            node = node.parentElement;
+                if (window.__fbxNoOpenApp2) return;
+                window.__fbxNoOpenApp2 = true;
+                var CSS = '[data-fbx-gone="1"]{display:none !important;visibility:hidden !important;}' +
+                          '[aria-label="Open app"],[aria-label="Open in app"]{display:none !important;}';
+                function ensureStyle() {
+                    if (document.getElementById('__fbxGoneCss')) return;
+                    var host = document.head || document.documentElement;
+                    if (!host) return;
+                    var st = document.createElement('style');
+                    st.id = '__fbxGoneCss';
+                    st.textContent = CSS;
+                    host.appendChild(st);
+                }
+                function hideLeaf(leaf) {
+                    if (leaf.closest && leaf.closest('[data-fbx-gone="1"]')) return;
+                    var node = leaf;
+                    while (node.parentElement && node.parentElement !== document.body &&
+                           node.parentElement !== document.documentElement &&
+                           (node.parentElement.textContent || '').trim() === 'Open app') {
+                        node = node.parentElement;
+                    }
+                    node.setAttribute('data-fbx-gone', '1');
+                }
+                function scan(root) {
+                    if (!root) return;
+                    try {
+                        var r = document.evaluate("descendant-or-self::*[normalize-space(text())='Open app']", root, null,
+                                                  XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+                        for (var i = 0; i < r.snapshotLength; i++) hideLeaf(r.snapshotItem(i));
+                    } catch (e) {}
+                }
+                function onMut(muts) {
+                    ensureStyle();
+                    for (var i = 0; i < muts.length; i++) {
+                        var m = muts[i];
+                        if (m.type === 'characterData') {
+                            if ((m.target.nodeValue || '').indexOf('Open app') > -1) scan(m.target.parentElement);
+                            continue;
                         }
-                        node.setAttribute('data-fbx-gone', '1');
-                        node.style.setProperty('display', 'none', 'important');
+                        for (var j = 0; j < m.addedNodes.length; j++) {
+                            var n = m.addedNodes[j];
+                            if (n.nodeType === 3) {
+                                if ((n.nodeValue || '').indexOf('Open app') > -1) scan(n.parentElement);
+                            } else if (n.nodeType === 1 && (n.textContent || '').indexOf('Open app') > -1) {
+                                scan(n);
+                            }
+                        }
                     }
                 }
-                var timer = null;
-                function later() { if (timer) return; timer = setTimeout(function() { timer = null; try { hide(); } catch (e) {} }, 200); }
-                try { hide(); } catch (e) {}
-                if (!window.__fbxNoOpenAppObs) {
-                    window.__fbxNoOpenAppObs = new MutationObserver(later);
-                    window.__fbxNoOpenAppObs.observe(document.documentElement, { childList: true, subtree: true });
-                }
+                new MutationObserver(onMut).observe(document, { childList: true, subtree: true, characterData: true });
+                function sweep() { ensureStyle(); scan(document.body || document.documentElement); }
+                sweep();
+                setInterval(sweep, 1500);
+                document.addEventListener('visibilitychange', sweep, true);
+                window.addEventListener('pageshow', sweep, true);
+                window.addEventListener('focus', sweep, true);
             })();
         """
 
@@ -422,6 +513,17 @@ class MainActivity : AppCompatActivity() {
         webView.addJavascriptInterface(BlobDownloader(), "AndroidDownloader")
         webView.addJavascriptInterface(BarBridge(), "AndroidBars")
         webView.addJavascriptInterface(MessengerBridge(), "AndroidMessenger")
+
+        // Run the hide-"Open app" and Messenger scripts at DOCUMENT START: before the page draws or runs
+        // anything. That is what stops the "Open app" bar flashing and makes the Message tap hook live
+        // from the very first moment (including after the app is restored).
+        try {
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                val origins = setOf("https://*.facebook.com")
+                WebViewCompat.addDocumentStartJavaScript(webView, HIDE_OPEN_APP_JS, origins)
+                WebViewCompat.addDocumentStartJavaScript(webView, MESSENGER_HOOK_JS, origins)
+            }
+        } catch (e: Exception) { /* the later evaluateJavascript injections still work as a fallback */ }
 
         webView.webChromeClient = object : WebChromeClient() {
             override fun onShowFileChooser(

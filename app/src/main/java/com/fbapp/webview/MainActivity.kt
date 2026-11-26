@@ -25,6 +25,16 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.CookieManager
 import android.widget.Toast
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
+import android.graphics.drawable.GradientDrawable
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.view.animation.LinearInterpolator
+import android.widget.FrameLayout
+import android.widget.ImageView
+import android.widget.LinearLayout
 import java.io.File
 import java.io.FileOutputStream
 import androidx.activity.result.contract.ActivityResultContracts
@@ -410,6 +420,44 @@ class MainActivity : AppCompatActivity() {
             })();
         """
 
+        // Tells the app when the page is really ready (feed drawn: posts / big images visible, or a login
+        // form), so the native loading screen can be removed.
+        const val FEED_READY_JS = """
+            (function() {
+                if (window.__fbxReadyWatch) return;
+                window.__fbxReadyWatch = true;
+                var t0 = Date.now(), fired = false;
+                function bigImagesShown() {
+                    var imgs = document.images, n = 0;
+                    for (var i = 0; i < imgs.length; i++) {
+                        var im = imgs[i];
+                        if (!im.complete || im.naturalWidth < 120) continue;
+                        var r = im.getBoundingClientRect();
+                        if (r.width > 120 && r.height > 80 && r.bottom > 0 && r.top < window.innerHeight) n++;
+                    }
+                    return n >= 2;
+                }
+                function isReady() {
+                    if (document.querySelector('input[type="password"]')) return true;   // login page
+                    if (document.querySelector('[role="article"]')) return true;         // a post is drawn
+                    return bigImagesShown();                                             // stories / photos drawn
+                }
+                var timer = setInterval(function() {
+                    if (fired) return;
+                    var ok = false;
+                    try { ok = isReady(); } catch (e) {}
+                    if (ok || Date.now() - t0 > 7000) {
+                        fired = true;
+                        clearInterval(timer);
+                        // one more frame so the feed is really painted before the cover is lifted
+                        requestAnimationFrame(function() {
+                            setTimeout(function() { try { AndroidLoader.ready(); } catch (e) {} }, 120);
+                        });
+                    }
+                }, 120);
+            })();
+        """
+
         // Tells the app whether a big (reel / watch style) video fills the screen.
         const val BAR_MODE_JS = """
             (function() {
@@ -448,7 +496,16 @@ class MainActivity : AppCompatActivity() {
         registerDownloadCompleteReceiver()
 
         webView = WebView(this)
-        setContentView(webView)
+        val root = FrameLayout(this)
+        root.setBackgroundColor(Color.BLACK)
+        root.addView(webView, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        setContentView(root)
+        // Native loading screen (logo + 3 blinking dots) that stays until the home feed is really drawn.
+        val loader = buildLoader()
+        loaderView = loader
+        root.addView(loader, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        // Safety net: never keep the cover up for more than 9 seconds.
+        webView.postDelayed({ hideLoader() }, 9000)
 
         val settings: WebSettings = webView.settings
         settings.javaScriptEnabled = true
@@ -489,6 +546,7 @@ class MainActivity : AppCompatActivity() {
                 view.evaluateJavascript(NO_TAP_HIGHLIGHT_JS, null)
                 view.evaluateJavascript(MESSENGER_HOOK_JS, null)
                 view.evaluateJavascript(HIDE_OPEN_APP_JS, null)
+                if (!loaderHidden) view.evaluateJavascript(FEED_READY_JS, null)
             }
 
             override fun onPageFinished(view: WebView, url: String?) {
@@ -499,6 +557,11 @@ class MainActivity : AppCompatActivity() {
                 view.evaluateJavascript(MESSENGER_HOOK_JS, null)
                 view.evaluateJavascript(NO_TAP_HIGHLIGHT_JS, null)
                 view.evaluateJavascript(HIDE_OPEN_APP_JS, null)
+                if (!loaderHidden) {
+                    view.evaluateJavascript(FEED_READY_JS, null)
+                    // Any page other than the home feed (login, a shared link...) has no feed to wait for.
+                    if (!isHomeUrl(url)) view.postDelayed({ hideLoader() }, 500)
+                }
             }
 
             // Non-Facebook links open in the phone's browser, Facebook links stay in the app.
@@ -512,6 +575,7 @@ class MainActivity : AppCompatActivity() {
 
         webView.addJavascriptInterface(BlobDownloader(), "AndroidDownloader")
         webView.addJavascriptInterface(BarBridge(), "AndroidBars")
+        webView.addJavascriptInterface(LoaderBridge(), "AndroidLoader")
         webView.addJavascriptInterface(MessengerBridge(), "AndroidMessenger")
 
         // Run the hide-"Open app" and Messenger scripts at DOCUMENT START: before the page draws or runs
@@ -770,6 +834,84 @@ class MainActivity : AppCompatActivity() {
             return path == "/messages" || path.startsWith("/messages/") || path.startsWith("/messenger")
         }
         return false
+    }
+
+    private var loaderView: FrameLayout? = null
+    private var loaderHidden = false
+    private val dotAnimators = mutableListOf<ObjectAnimator>()
+
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    /** True for the Facebook home feed (where we wait for posts to draw). */
+    private fun isHomeUrl(url: String?): Boolean {
+        val u = url?.let { Uri.parse(it) } ?: return false
+        val host = u.host?.lowercase() ?: return false
+        if (!(host == "facebook.com" || host.endsWith(".facebook.com"))) return false
+        val path = (u.path ?: "").trimEnd('/')
+        return path.isEmpty() || path == "/home.php"
+    }
+
+    /** Splash-style cover: Facebook logo with three softly blinking dots underneath. */
+    private fun buildLoader(): FrameLayout {
+        val overlay = FrameLayout(this)
+        overlay.setBackgroundColor(Color.BLACK)
+        overlay.isClickable = true      // swallow touches while the page is still loading
+        overlay.isFocusable = true
+
+        val logo = ImageView(this)
+        logo.setImageResource(R.drawable.splash_logo)
+        logo.scaleType = ImageView.ScaleType.FIT_CENTER
+        overlay.addView(logo, FrameLayout.LayoutParams(dp(288), dp(288), Gravity.CENTER))
+
+        val dots = LinearLayout(this)
+        dots.orientation = LinearLayout.HORIZONTAL
+        dots.gravity = Gravity.CENTER
+        for (i in 0..2) {
+            val dot = View(this)
+            val shape = GradientDrawable()
+            shape.shape = GradientDrawable.OVAL
+            shape.setColor(Color.parseColor("#0866FF"))
+            dot.background = shape
+            dot.alpha = 0.2f
+            val lp = LinearLayout.LayoutParams(dp(9), dp(9))
+            lp.marginStart = dp(6)
+            lp.marginEnd = dp(6)
+            dots.addView(dot, lp)
+
+            val anim = ObjectAnimator.ofFloat(dot, View.ALPHA, 0.2f, 1f, 0.2f)
+            anim.duration = 1050
+            anim.startDelay = i * 170L
+            anim.repeatCount = ValueAnimator.INFINITE
+            anim.interpolator = LinearInterpolator()
+            dotAnimators.add(anim)
+        }
+        val dotsLp = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER
+        )
+        overlay.addView(dots, dotsLp)
+        dots.translationY = dp(78).toFloat()   // just below the logo
+        dotAnimators.forEach { it.start() }
+        return overlay
+    }
+
+    /** Fades the loading cover out and removes it (safe to call many times). */
+    private fun hideLoader() {
+        if (loaderHidden) return
+        loaderHidden = true
+        val v = loaderView ?: return
+        v.animate().alpha(0f).setDuration(220).withEndAction {
+            dotAnimators.forEach { it.cancel() }
+            dotAnimators.clear()
+            (v.parent as? ViewGroup)?.removeView(v)
+            loaderView = null
+        }.start()
+    }
+
+    private inner class LoaderBridge {
+        @JavascriptInterface
+        fun ready() {
+            runOnUiThread { hideLoader() }
+        }
     }
 
     /** Called from the injected JS when the Messenger tab / Message button is tapped. */

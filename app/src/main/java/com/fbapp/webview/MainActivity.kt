@@ -126,7 +126,7 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         // TEMPORARY: shows a small toast telling which path opened Messenger. Set to false once tested.
-        const val DEBUG_MESSENGER = true
+        const val DEBUG_MESSENGER = false
 
         // Presses Escape, and if a menu is still open taps the empty area outside it.
         const val DISMISS_MENU_JS = """

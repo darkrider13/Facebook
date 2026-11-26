@@ -164,66 +164,6 @@ class MainActivity : AppCompatActivity() {
             })();
         """
 
-        // Dark mode: round icon-only buttons (back, search, menu...) end up dark-on-dark and
-        // are hard to see. Give them a lighter circle and a white icon.
-        const val VISIBLE_BUTTONS_JS = """
-            (function() {
-                if (!document.getElementById('__fbxBtnCss')) {
-                    var st = document.createElement('style');
-                    st.id = '__fbxBtnCss';
-                    st.textContent =
-                        '[data-fbx-round="1"]{background-color:#3a3b3c !important;}' +
-                        '[data-fbx-icon="1"]{filter:brightness(0) invert(1) !important;opacity:1 !important;}';
-                    (document.head || document.documentElement).appendChild(st);
-                }
-                function isRound(el) {
-                    var r = el.getBoundingClientRect();
-                    if (r.width < 26 || r.width > 80 || Math.abs(r.width - r.height) > 6) return false;
-                    var cs = getComputedStyle(el);
-                    var rad = parseFloat(cs.borderTopLeftRadius) || 0;
-                    return rad >= r.width * 0.4 || cs.borderTopLeftRadius.indexOf('%') > -1;
-                }
-                function clickable(el) {
-                    return !!(el.closest('[role="button"],[role="link"],button,a,[tabindex]')) ||
-                           getComputedStyle(el).cursor === 'pointer';
-                }
-                function scan() {
-                    var icons = document.querySelectorAll('svg:not([data-fbx-icon]), i:not([data-fbx-icon]), img:not([data-fbx-icon])');
-                    for (var n = 0; n < icons.length; n++) {
-                        var ic = icons[n];
-                        var ir = ic.getBoundingClientRect();
-                        if (ir.width === 0 || ir.height === 0) continue; // not laid out yet, retry later
-                        ic.setAttribute('data-fbx-icon', '0');
-                        if (ir.width > 40 || ir.height > 40) continue;
-                        var el = ic.parentElement, found = null;
-                        for (var d = 0; d < 5 && el && el !== document.body; d++, el = el.parentElement) {
-                            if (isRound(el)) { found = el; break; }
-                        }
-                        if (!found) continue;
-                        var fr = found.getBoundingClientRect();
-                        if (fr.width < ir.width * 1.25) continue;          // icon must sit inside a bigger circle
-                        if (found.querySelector('video,canvas,image')) continue;
-                        if (!clickable(found)) continue;
-                        var imgs = found.querySelectorAll('img');
-                        var big = false;
-                        for (var k = 0; k < imgs.length; k++) {
-                            if (imgs[k].getBoundingClientRect().width > 40) big = true;
-                        }
-                        if (big) continue;                                   // profile photo etc.
-                        found.setAttribute('data-fbx-round', '1');
-                        ic.setAttribute('data-fbx-icon', '1');
-                    }
-                }
-                var timer = null;
-                function later() { if (timer) return; timer = setTimeout(function() { timer = null; try { scan(); } catch (e) {} }, 250); }
-                scan();
-                if (!window.__fbxBtnObs) {
-                    window.__fbxBtnObs = new MutationObserver(later);
-                    window.__fbxBtnObs.observe(document.documentElement, { childList: true, subtree: true });
-                }
-            })();
-        """
-
         // Catches taps on the Messenger tab / "Message" button the instant the finger lifts
         // (pointer, touch and click), BEFORE Facebook starts loading anything, and hands the
         // tap to Kotlin so Messenger opens straight away.
@@ -376,7 +316,6 @@ class MainActivity : AppCompatActivity() {
                 view.evaluateJavascript(BAR_MODE_JS, null)
                 view.evaluateJavascript(MESSENGER_HOOK_JS, null)
                 view.evaluateJavascript(NO_TAP_HIGHLIGHT_JS, null)
-                view.evaluateJavascript(VISIBLE_BUTTONS_JS, null)
             }
 
             // Non-Facebook links open in the phone's browser, Facebook links stay in the app.

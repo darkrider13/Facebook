@@ -198,6 +198,31 @@ class MainActivity : AppCompatActivity() {
                     return null;
                 }
 
+                // Numeric id of the profile that is open right now. A numeric id lets Messenger open
+                // the chat instantly (fb-messenger://user-thread/ID); a username has to be looked up first.
+                // The id comes from the page's own app-link meta tag, and is only trusted when the page's
+                // canonical address is the same as the address we are on (so it can't be a stale id).
+                function pageKey(u) {
+                    try {
+                        var p = new URL(u, location.href);
+                        var path = p.pathname.replace(/\/+/g, '/').replace(/\/+$/, '').toLowerCase();
+                        return path + (path === '/profile.php' ? '?id=' + p.searchParams.get('id') : '');
+                    } catch (e) { return ''; }
+                }
+                function profileId() {
+                    try {
+                        var m = document.querySelector('meta[property="al:android:url"],meta[name="al:android:url"]');
+                        var c = (m && m.getAttribute('content')) || '';
+                        var r = /^fb:\/\/(?:profile|user)\/(\d{5,})/i.exec(c);
+                        if (!r) return '';
+                        var can = document.querySelector('link[rel="canonical"]');
+                        var og = document.querySelector('meta[property="og:url"]');
+                        var ref = (can && can.href) || (og && og.getAttribute('content')) || '';
+                        if (!ref) return '';
+                        return pageKey(ref) === pageKey(location.href) ? r[1] : '';
+                    } catch (e) { return ''; }
+                }
+
                 function onStart(e) {
                     var p = (e.touches && e.touches[0]) || e;
                     sx = p.clientX; sy = p.clientY; hasStart = true;
@@ -218,7 +243,8 @@ class MainActivity : AppCompatActivity() {
                     var now = Date.now();
                     if (now - lastFire < 800) return;   // same tap already handled
                     lastFire = now;
-                    try { AndroidMessenger.open(m.href, location.href); } catch (err) {}
+                    var uid = m.href ? '' : profileId();
+                    try { AndroidMessenger.open(m.href, location.href, uid); } catch (err) {}
                 }
 
                 window.addEventListener('pointerdown', onStart, true);
@@ -581,15 +607,19 @@ class MainActivity : AppCompatActivity() {
     /** Called from the injected JS when the Messenger tab / Message button is tapped. */
     private inner class MessengerBridge {
         @JavascriptInterface
-        fun open(href: String, pageUrl: String) {
-            runOnUiThread { openMessengerFor(href, pageUrl) }
+        fun open(href: String, pageUrl: String, uid: String) {
+            runOnUiThread { openMessengerFor(href, pageUrl, uid) }
         }
     }
 
-    private fun openMessengerFor(href: String?, pageUrl: String?) {
+    private fun openMessengerFor(href: String?, pageUrl: String?, uid: String?) {
         var target: String? = null
         if (!href.isNullOrEmpty()) target = messengerTargetFromUrl(Uri.parse(href))
         if (target == null && !pageUrl.isNullOrEmpty()) target = profileTargetFromUrl(Uri.parse(pageUrl))
+        // A numeric id opens the chat instantly; a username has to be looked up by Messenger first (slow).
+        if ((target == null || !target.all { it.isDigit() }) && !uid.isNullOrEmpty() && uid.all { it.isDigit() }) {
+            target = uid
+        }
         openMessengerChat(target)
     }
 

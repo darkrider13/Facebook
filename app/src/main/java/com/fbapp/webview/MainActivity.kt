@@ -209,7 +209,10 @@ class MainActivity : AppCompatActivity() {
                         return path + (path === '/profile.php' ? '?id=' + p.searchParams.get('id') : '');
                     } catch (e) { return ''; }
                 }
+                var idCache = {}, idPending = {}, idTries = {};
                 function profileId() {
+                    var key = pageKey(location.href);
+                    if (idCache[key]) return idCache[key];
                     try {
                         var m = document.querySelector('meta[property="al:android:url"],meta[name="al:android:url"]');
                         var c = (m && m.getAttribute('content')) || '';
@@ -219,9 +222,42 @@ class MainActivity : AppCompatActivity() {
                         var og = document.querySelector('meta[property="og:url"]');
                         var ref = (can && can.href) || (og && og.getAttribute('content')) || '';
                         if (!ref) return '';
-                        return pageKey(ref) === pageKey(location.href) ? r[1] : '';
+                        if (pageKey(ref) === key) { idCache[key] = r[1]; return r[1]; }
+                        return '';
                     } catch (e) { return ''; }
                 }
+
+                // Facebook changes pages without a real reload, so the meta tag above goes stale after the
+                // first profile. For every new profile we quietly fetch its page once in the background,
+                // read the numeric id from the returned html, and keep it ready for the Message tap.
+                function hasMessageBtn() {
+                    try {
+                        if (document.querySelector('[aria-label="Message"]')) return true;
+                        var x = document.evaluate("//*[normalize-space(text())='Message']", document, null,
+                                                  XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                        return !!x.singleNodeValue;
+                    } catch (e) { return false; }
+                }
+                function prefetchId() {
+                    var url = location.href;
+                    var key = pageKey(url);
+                    if (idCache[key] || idPending[key]) return;
+                    if ((idTries[key] || 0) >= 10) return;
+                    idTries[key] = (idTries[key] || 0) + 1;
+                    if (profileId()) return;
+                    if (!hasMessageBtn()) return;
+                    idPending[key] = true;
+                    fetch(url, { credentials: 'include', headers: { 'Accept': 'text/html' } })
+                        .then(function(r) { return r.text(); })
+                        .then(function(t) {
+                            var m = /al:android:url"[^>]*content="fb:\/\/(?:profile|user)\/(\d{5,})/i.exec(t) ||
+                                    /content="fb:\/\/(?:profile|user)\/(\d{5,})"[^>]*al:android:url/i.exec(t);
+                            if (m) idCache[key] = m[1];
+                            idPending[key] = false;
+                        })
+                        .catch(function() { idPending[key] = false; });
+                }
+                setInterval(function() { try { prefetchId(); } catch (e) {} }, 700);
 
                 function onStart(e) {
                     var p = (e.touches && e.touches[0]) || e;
@@ -252,6 +288,34 @@ class MainActivity : AppCompatActivity() {
                 window.addEventListener('pointerup', onEnd, true);
                 window.addEventListener('touchend', onEnd, { capture: true, passive: false });
                 window.addEventListener('click', onEnd, true);
+            })();
+        """
+
+        // Hides Facebook's blue "Open app" bar (shown under reels / videos on the mobile site).
+        // Finds the button by its text, then hides the smallest wrapper that holds only that text.
+        const val HIDE_OPEN_APP_JS = """
+            (function() {
+                function hide() {
+                    var r = document.evaluate("//*[normalize-space(text())='Open app']", document, null,
+                                              XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+                    for (var i = 0; i < r.snapshotLength; i++) {
+                        var node = r.snapshotItem(i);
+                        if (!node || node.getAttribute('data-fbx-gone') === '1') continue;
+                        while (node.parentElement && node.parentElement !== document.body &&
+                               (node.parentElement.textContent || '').trim() === 'Open app') {
+                            node = node.parentElement;
+                        }
+                        node.setAttribute('data-fbx-gone', '1');
+                        node.style.setProperty('display', 'none', 'important');
+                    }
+                }
+                var timer = null;
+                function later() { if (timer) return; timer = setTimeout(function() { timer = null; try { hide(); } catch (e) {} }, 200); }
+                try { hide(); } catch (e) {}
+                if (!window.__fbxNoOpenAppObs) {
+                    window.__fbxNoOpenAppObs = new MutationObserver(later);
+                    window.__fbxNoOpenAppObs.observe(document.documentElement, { childList: true, subtree: true });
+                }
             })();
         """
 
@@ -333,6 +397,7 @@ class MainActivity : AppCompatActivity() {
                 super.onPageCommitVisible(view, url)
                 view.evaluateJavascript(NO_TAP_HIGHLIGHT_JS, null)
                 view.evaluateJavascript(MESSENGER_HOOK_JS, null)
+                view.evaluateJavascript(HIDE_OPEN_APP_JS, null)
             }
 
             override fun onPageFinished(view: WebView, url: String?) {
@@ -342,6 +407,7 @@ class MainActivity : AppCompatActivity() {
                 view.evaluateJavascript(BAR_MODE_JS, null)
                 view.evaluateJavascript(MESSENGER_HOOK_JS, null)
                 view.evaluateJavascript(NO_TAP_HIGHLIGHT_JS, null)
+                view.evaluateJavascript(HIDE_OPEN_APP_JS, null)
             }
 
             // Non-Facebook links open in the phone's browser, Facebook links stay in the app.

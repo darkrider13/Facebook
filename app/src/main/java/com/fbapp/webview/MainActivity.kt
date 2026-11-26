@@ -135,6 +135,34 @@ class MainActivity : AppCompatActivity() {
             })();
         """
 
+        // Removes the blue tap/selection flash that WebView draws when something is tapped
+        // (most visible on the full-screen photo viewer).
+        const val NO_TAP_HIGHLIGHT_JS = """
+            (function() {
+                var nonText = 'a,a *,button,button *,[role="button"],[role="button"] *,[role="link"],[role="link"] *,' +
+                              '[role="menuitem"],[role="menuitem"] *,[role="tab"],[role="tab"] *,[role="img"],[role="img"] *,' +
+                              '[role="dialog"] [role="presentation"],[tabindex],img,video,canvas,svg,svg *,i';
+                var css = '*{-webkit-tap-highlight-color:transparent !important;}' +
+                          '*:focus,*:focus-visible{outline:none !important;}' +
+                          nonText + '{-webkit-user-select:none !important;user-select:none !important;' +
+                          '-webkit-tap-highlight-color:transparent !important;}' +
+                          nonText.split(',').map(function(x){return x+'::selection';}).join(',') +
+                          '{background:transparent !important;}';
+                function add() {
+                    if (document.getElementById('__noTapHl')) return;
+                    var st = document.createElement('style');
+                    st.id = '__noTapHl';
+                    st.textContent = css;
+                    (document.head || document.documentElement).appendChild(st);
+                }
+                add();
+                if (!window.__noTapHlObs) {
+                    window.__noTapHlObs = new MutationObserver(add);
+                    window.__noTapHlObs.observe(document.documentElement, { childList: true, subtree: false });
+                }
+            })();
+        """
+
         // Tells the app whether a big (reel / watch style) video fills the screen.
         const val BAR_MODE_JS = """
             (function() {
@@ -197,11 +225,27 @@ class MainActivity : AppCompatActivity() {
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
 
         webView.webViewClient = object : WebViewClient() {
+            // m.facebook.com changes pages without a real load (pushState), so
+            // shouldOverrideUrlLoading doesn't always fire. Catch the Messages page here.
+            override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
+                super.doUpdateVisitedHistory(view, url, isReload)
+                if (url != null && isMessengerUrl(Uri.parse(url))) {
+                    handleExternalLink(url)
+                    view.post { if (view.canGoBack()) view.goBack() }
+                }
+            }
+
+            override fun onPageCommitVisible(view: WebView, url: String?) {
+                super.onPageCommitVisible(view, url)
+                view.evaluateJavascript(NO_TAP_HIGHLIGHT_JS, null)
+            }
+
             override fun onPageFinished(view: WebView, url: String?) {
                 super.onPageFinished(view, url)
                 // Commit the login/session cookie to disk so it survives a background process kill.
                 CookieManager.getInstance().flush()
                 view.evaluateJavascript(BAR_MODE_JS, null)
+                view.evaluateJavascript(NO_TAP_HIGHLIGHT_JS, null)
             }
 
             // Non-Facebook links open in the phone's browser, Facebook links stay in the app.
@@ -415,6 +459,12 @@ class MainActivity : AppCompatActivity() {
         val scheme = uri.scheme?.lowercase() ?: return false
         if (scheme in listOf("about", "blob", "data", "javascript", "file")) return false
 
+        // Message button / "Go to Messenger" -> open the Messenger app (or Play Store)
+        if (isMessengerUrl(uri)) {
+            openMessenger(uri)
+            return true
+        }
+
         if (scheme == "http" || scheme == "https") {
             val host = uri.host?.lowercase()
             // Facebook wraps outgoing links as l.facebook.com/l.php?u=<real link>
@@ -433,6 +483,70 @@ class MainActivity : AppCompatActivity() {
 
         openInBrowser(url)
         return true
+    }
+
+    private val messengerPackage = "com.facebook.orca"
+
+    /** True for any link that means "go to Messenger". */
+    private fun isMessengerUrl(uri: Uri): Boolean {
+        val scheme = uri.scheme?.lowercase() ?: return false
+        if (scheme.startsWith("fb-messenger")) return true
+        if (scheme == "intent") {
+            val s = uri.toString()
+            return s.contains(messengerPackage) || s.contains("fb-messenger")
+        }
+        if (scheme != "http" && scheme != "https") return false
+        val host = uri.host?.lowercase() ?: return false
+        val path = uri.path ?: ""
+        if (path.startsWith("/l.php")) return false // outgoing-link wrapper, handled elsewhere
+        if (host == "m.me" || host.endsWith(".m.me")) return true
+        if (host == "messenger.com" || host.endsWith(".messenger.com")) return true
+        if (host == "facebook.com" || host.endsWith(".facebook.com")) {
+            return path == "/messages" || path.startsWith("/messages/") || path.startsWith("/messenger")
+        }
+        return false
+    }
+
+    /** Opens Messenger (straight to the chat if we know the user id); Play Store if not installed. */
+    private fun openMessenger(uri: Uri) {
+        val path = uri.path ?: ""
+        val threadId = Regex("/messages/(?:t|thread)/(\\d+)").find(path)?.groupValues?.get(1)
+        val host = uri.host?.lowercase()
+
+        val deepLink: Uri? = when {
+            host == "m.me" -> uri
+            threadId != null -> Uri.parse("https://m.me/$threadId")
+            else -> null
+        }
+
+        // 1) Open the specific chat in Messenger
+        if (deepLink != null) {
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, deepLink).setPackage(messengerPackage))
+                return
+            } catch (e: Exception) { /* try next */ }
+        }
+        // 2) Just launch Messenger
+        try {
+            val launch = packageManager.getLaunchIntentForPackage(messengerPackage)
+            if (launch != null) {
+                startActivity(launch)
+                return
+            }
+        } catch (e: Exception) { /* try next */ }
+        // 3) Not installed -> Play Store
+        openMessengerInPlayStore()
+    }
+
+    private fun openMessengerInPlayStore() {
+        try {
+            startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$messengerPackage"))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        } catch (e: Exception) {
+            openInBrowser("https://play.google.com/store/apps/details?id=$messengerPackage")
+        }
     }
 
     private fun openInBrowser(url: String) {
